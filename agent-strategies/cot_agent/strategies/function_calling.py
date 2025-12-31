@@ -382,6 +382,7 @@ class FunctionCallingAgentStrategy(AgentStrategy):
                 else:
                     # invoke tool
                     try:
+                        
                         tool_invoke_responses = self.session.tool.invoke(
                             provider_type=ToolProviderType(tool_instance.provider_type),
                             provider=tool_instance.identity.provider,

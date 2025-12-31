@@ -706,24 +706,23 @@ class ReActAgentStrategy(AgentStrategy):
         elif response.type in {
             ToolInvokeMessage.MessageType.IMAGE_LINK,
             ToolInvokeMessage.MessageType.IMAGE,
-            ToolInvokeMessage.MessageType.BINARY_LINK,
-        }:
-            logger.info(f"Serializing IMAGE/LINK/BINARY response: {response.type}")
-            if hasattr(response.message, "text"):
-                file_info = cast(
-                    ToolInvokeMessage.TextMessage, response.message
-                ).text
-                try:
-                    tool_file_id = file_info.split("/")[-1].split(".")[0]
-                    serialized = json.dumps({
+            ToolInvokeMessage.MessageType.BLOB,
+            "binary_link"
+            } :
+            if isinstance(response.message, ToolInvokeMessage.TextMessage):
+                message_text = response.message.text
+            else:
+                message_text = str(response.message)
+            try:
+                tool_file_id = message_text.split("/")[-1].split(".")[0]
+                serialized = json.dumps({
                         "related_id": tool_file_id,
                         "transfer_method": "tool_file",
-                    }, ensure_ascii=False)
-                    logger.info(f"Serialized file link: {serialized}")
-                    result += serialized
-                except Exception as e:
-                    logger.info(f"Failed to parse tool_file_id from {file_info}: {e}")
-                    result += file_info
+                        }, ensure_ascii=False)
+                result += serialized
+            except Exception as e:
+                logger.info(f"Failed to parse tool_file_id from {message_text}: {e}")
+                result += message_text
         elif response.type == ToolInvokeMessage.MessageType.JSON:
             text = json.dumps(
                 cast(
@@ -732,25 +731,6 @@ class ReActAgentStrategy(AgentStrategy):
                 ensure_ascii=False,
             )
             result += f"tool response: {text}."
-        elif response.type == ToolInvokeMessage.MessageType.BLOB:
-            logger.info("Serializing BLOB response")
-            if hasattr(response.message, "text"):
-                file_info = cast(
-                    ToolInvokeMessage.TextMessage, response.message
-                ).text
-                try:
-                    tool_file_id = file_info.split("/")[-1].split(".")[0]
-                    serialized = json.dumps({
-                        "related_id": tool_file_id,
-                        "transfer_method": "tool_file",
-                    }, ensure_ascii=False)
-                    logger.info(f"Serialized BLOB: {serialized}")
-                    result += serialized
-                except Exception as e:
-                    logger.info(f"Failed to parse tool_file_id from BLOB info {file_info}: {e}")
-                    result += "Generated file ... "
-            else:
-                result += "Generated file ... "
         elif response.type == ToolInvokeMessage.MessageType.FILE:
             logger.info("Serializing FILE response")
             if response.meta and "file" in response.meta:
