@@ -9,6 +9,7 @@ from dify_plugin.entities.model.llm import LLMModelConfig, LLMUsage
 from dify_plugin.entities.model.message import (
     AssistantPromptMessage,
     PromptMessage,
+    PromptMessageTool,
     SystemPromptMessage,
     UserPromptMessage,
 )
@@ -24,6 +25,12 @@ from dify_plugin.interfaces.agent import (
     AgentStrategy,
     ToolEntity,
 )
+import logging
+from dify_plugin.config.logger_format import plugin_logger_handler
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(plugin_logger_handler)
 from output_parser.cot_output_parser import ReactChunk, ReactState, CotAgentOutputParser
 from prompt.template import REACT_PROMPT_TEMPLATES
 from pydantic import BaseModel, Field
@@ -70,6 +77,28 @@ class ReActAgentStrategy(AgentStrategy):
     instruction: str = ""
     history_prompt_messages: list[PromptMessage] = Field(default_factory=list)
     prompt_messages_tools: list[ToolEntity] = Field(default_factory=list)
+
+    # JSON Schema for FILE type parameters
+    FILE_JSON_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "related_id": {
+                "type": "string",
+                "description": "File related_id, must be UUID format.",
+            },
+            "transfer_method": {
+                "type": "string",
+                "description": "File transfer method.",
+                "enum": [
+                    "remote_url",
+                    "local_file",
+                    "tool_file",
+                    "datasource_file",
+                ],
+            },
+        },
+        "required": ["related_id", "transfer_method"],
+    }
 
     @property
     def _user_prompt_message(self) -> UserPromptMessage:
@@ -512,41 +541,15 @@ class ReActAgentStrategy(AgentStrategy):
             result = ""
             additional_messages = []  # Collect messages that need to be yielded
             for response in tool_invoke_responses:
-                if response.type == ToolInvokeMessage.MessageType.TEXT:
-                    result += cast(ToolInvokeMessage.TextMessage, response.message).text
-                elif response.type == ToolInvokeMessage.MessageType.LINK:
-                    result += (
-                        f"result link: {cast(ToolInvokeMessage.TextMessage, response.message).text}."
-                        + " please tell user to check it."
-                    )
-                elif response.type in {
+                result += self._serialize_tool_response(response)
+                if response.type in {
                     ToolInvokeMessage.MessageType.IMAGE_LINK,
                     ToolInvokeMessage.MessageType.IMAGE,
+                    ToolInvokeMessage.MessageType.BLOB,
+                    ToolInvokeMessage.MessageType.FILE,
+                    "binary_link"
                 }:
-                    # Pass through the original IMAGE_LINK response for upper layer handling
                     additional_messages.append(response)
-                    # Include the actual file path information for the LLM
-                    image_link_text = cast(
-                        ToolInvokeMessage.TextMessage, response.message
-                    ).text
-                    result += (
-                        f"Image has been successfully generated and saved to: {image_link_text}. "
-                        + "The image file is now available for download. "
-                        + "Please inform the user that the image has been created successfully."
-                    )
-                elif response.type == ToolInvokeMessage.MessageType.JSON:
-                    text = json.dumps(
-                        cast(
-                            ToolInvokeMessage.JsonMessage, response.message
-                        ).json_object,
-                        ensure_ascii=False,
-                    )
-                    result += f"tool response: {text}."
-                elif response.type == ToolInvokeMessage.MessageType.BLOB:
-                    result += "Generated file with ... "
-                    additional_messages.append(response)
-                else:
-                    result += f"tool response: {response.message!r}."
         except Exception as e:
             result = f"tool invoke error: {e!s}"
             additional_messages = []
@@ -579,3 +582,197 @@ class ReActAgentStrategy(AgentStrategy):
                     message += f"Observation: {scratchpad.observation}\n\n"
 
         return message
+
+    def _convert_tool_to_prompt_message_tool(self, tool: ToolEntity) -> PromptMessageTool:
+        """
+        convert tool to prompt message tool
+        """
+        message_tool = PromptMessageTool(
+            name=tool.identity.name,
+            description=tool.description.llm if tool.description else "",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+
+        parameters = tool.parameters
+        for parameter in parameters:
+            if parameter.form != ToolParameter.ToolParameterForm.LLM:
+                continue
+
+            parameter_type = parameter.type
+            if parameter.type in {
+                ToolParameter.ToolParameterType.SELECT,
+                ToolParameter.ToolParameterType.SECRET_INPUT,
+            }:
+                parameter_type = ToolParameter.ToolParameterType.STRING
+            enum = []
+            if parameter.type == ToolParameter.ToolParameterType.SELECT:
+                enum = [option.value for option in parameter.options] if parameter.options else []
+
+            message_tool.parameters["properties"][parameter.name] = (
+                {
+                    "type": parameter_type,
+                    "description": parameter.llm_description or "",
+                }
+                if parameter.input_schema is None
+                else parameter.input_schema
+            )
+
+            # Handle FILE type parameters with special schema
+            if parameter.type == ToolParameter.ToolParameterType.FILE:
+                logger.info(f"Handling FILE parameter: {parameter.name} for tool: {tool.identity.name}")
+                message_tool.parameters["properties"][parameter.name] = self.FILE_JSON_SCHEMA
+            elif parameter.type == ToolParameter.ToolParameterType.FILES:
+                logger.info(f"Handling FILES parameter: {parameter.name} for tool: {tool.identity.name}")
+                message_tool.parameters["properties"][parameter.name] = {
+                    "type": "array",
+                    "items": self.FILE_JSON_SCHEMA,
+                    "description": parameter.llm_description or "",
+                }
+
+            if len(enum) > 0:
+                message_tool.parameters["properties"][parameter.name]["enum"] = enum
+
+            if parameter.required:
+                message_tool.parameters["required"].append(parameter.name)
+
+        return message_tool
+
+    def update_prompt_message_tool(self, tool: ToolEntity, prompt_tool: PromptMessageTool) -> PromptMessageTool:
+        """
+        update prompt message tool
+        """
+        # try to get tool runtime parameters
+        tool_runtime_parameters = tool.parameters
+
+        for parameter in tool_runtime_parameters:
+            if parameter.form != ToolParameter.ToolParameterForm.LLM:
+                continue
+
+            parameter_type = parameter.type
+            if parameter.type in {
+                ToolParameter.ToolParameterType.SELECT,
+                ToolParameter.ToolParameterType.SECRET_INPUT,
+            }:
+                parameter_type = ToolParameter.ToolParameterType.STRING
+            enum = []
+            if parameter.type == ToolParameter.ToolParameterType.SELECT:
+                enum = [option.value for option in parameter.options] if parameter.options else []
+
+            prompt_tool.parameters["properties"][parameter.name] = (
+                {
+                    "type": parameter_type,
+                    "description": parameter.llm_description or "",
+                }
+                if parameter.input_schema is None
+                else parameter.input_schema
+            )
+
+            # Handle FILE type parameters with special schema
+            if parameter.type == ToolParameter.ToolParameterType.FILE:
+                logger.info(f"Updating FILE parameter: {parameter.name} for tool: {tool.identity.name}")
+                prompt_tool.parameters["properties"][parameter.name] = self.FILE_JSON_SCHEMA
+            elif parameter.type == ToolParameter.ToolParameterType.FILES:
+                logger.info(f"Updating FILES parameter: {parameter.name} for tool: {tool.identity.name}")
+                prompt_tool.parameters["properties"][parameter.name] = {
+                    "type": "array",
+                    "items": self.FILE_JSON_SCHEMA,
+                    "description": parameter.llm_description or "",
+                }
+
+            if len(enum) > 0:
+                prompt_tool.parameters["properties"][parameter.name]["enum"] = enum
+
+            if parameter.required and parameter.name not in prompt_tool.parameters["required"]:
+                prompt_tool.parameters["required"].append(parameter.name)
+
+        return prompt_tool
+
+    def _serialize_tool_response(self, response: ToolInvokeMessage) -> str:
+        """
+        Serialize tool response for LLM
+        """
+        result = ""
+        if response.type == ToolInvokeMessage.MessageType.TEXT:
+            result += cast(ToolInvokeMessage.TextMessage, response.message).text
+        elif response.type == ToolInvokeMessage.MessageType.LINK:
+            result += (
+                f"result link: {cast(ToolInvokeMessage.TextMessage, response.message).text}."
+                + " please tell user to check it."
+            )
+        elif response.type in {
+            ToolInvokeMessage.MessageType.IMAGE_LINK,
+            ToolInvokeMessage.MessageType.IMAGE,
+            ToolInvokeMessage.MessageType.BINARY_LINK,
+        }:
+            logger.info(f"Serializing IMAGE/LINK/BINARY response: {response.type}")
+            if hasattr(response.message, "text"):
+                file_info = cast(
+                    ToolInvokeMessage.TextMessage, response.message
+                ).text
+                try:
+                    tool_file_id = file_info.split("/")[-1].split(".")[0]
+                    serialized = json.dumps({
+                        "related_id": tool_file_id,
+                        "transfer_method": "tool_file",
+                    }, ensure_ascii=False)
+                    logger.info(f"Serialized file link: {serialized}")
+                    result += serialized
+                except Exception as e:
+                    logger.info(f"Failed to parse tool_file_id from {file_info}: {e}")
+                    result += file_info
+        elif response.type == ToolInvokeMessage.MessageType.JSON:
+            text = json.dumps(
+                cast(
+                    ToolInvokeMessage.JsonMessage, response.message
+                ).json_object,
+                ensure_ascii=False,
+            )
+            result += f"tool response: {text}."
+        elif response.type == ToolInvokeMessage.MessageType.BLOB:
+            logger.info("Serializing BLOB response")
+            if hasattr(response.message, "text"):
+                file_info = cast(
+                    ToolInvokeMessage.TextMessage, response.message
+                ).text
+                try:
+                    tool_file_id = file_info.split("/")[-1].split(".")[0]
+                    serialized = json.dumps({
+                        "related_id": tool_file_id,
+                        "transfer_method": "tool_file",
+                    }, ensure_ascii=False)
+                    logger.info(f"Serialized BLOB: {serialized}")
+                    result += serialized
+                except Exception as e:
+                    logger.info(f"Failed to parse tool_file_id from BLOB info {file_info}: {e}")
+                    result += "Generated file ... "
+            else:
+                result += "Generated file ... "
+        elif response.type == ToolInvokeMessage.MessageType.FILE:
+            logger.info("Serializing FILE response")
+            if response.meta and "file" in response.meta:
+                file_obj = response.meta["file"]
+                if hasattr(file_obj, "related_id"):
+                    serialized = json.dumps({
+                        "related_id": file_obj.related_id,
+                        "filename": getattr(file_obj, "filename", ""),
+                        "extension": getattr(file_obj, "extension", ""),
+                        "mime_type": getattr(file_obj, "mimetype", ""),
+                        "transfer_method": str(getattr(file_obj, "transfer_method", "tool_file")),
+                    }, ensure_ascii=False)
+                    logger.info(f"Serialized FILE: {serialized}")
+                    result += serialized
+                else:
+                    logger.info("FILE object has no related_id")
+                    result += "File received."
+            else:
+                logger.info("FILE message has no file in meta")
+                result += "File received."
+        else:
+            result += f"tool response: {response.message!r}."
+        
+        return result
+
