@@ -1,0 +1,5 @@
+path: "/admin/templates/<app_id>"
+method: "DELETE"
+extra:
+  python:
+    source: "endpoints/delete_template.py"

@@ -1,0 +1,5 @@
+path: "/apps"
+method: "GET"
+extra:
+  python:
+    source: "endpoints/list_apps.py"

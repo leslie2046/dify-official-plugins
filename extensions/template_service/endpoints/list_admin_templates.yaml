@@ -1,0 +1,5 @@
+path: "/admin/templates"
+method: "GET"
+extra:
+  python:
+    source: "endpoints/list_admin_templates.py"

@@ -1,0 +1,20 @@
+settings:
+  - name: admin_key
+    type: secret-input
+    required: true
+    label:
+      en_US: Admin API Key
+      zh_Hans: 管理员 API Key
+      pt_BR: Chave de API do Administrador
+      ja_JP: 管理者 API キー
+    placeholder:
+      en_US: Enter your admin API key for managing templates
+      zh_Hans: 输入管理模板的管理员 API Key
+      pt_BR: Digite sua chave de API de administrador para gerenciar modelos
+      ja_JP: テンプレートを管理するための管理者 API キーを入力してください
+endpoints:
+  - endpoints/list_apps.yaml
+  - endpoints/get_app.yaml
+  - endpoints/add_template.yaml
+  - endpoints/delete_template.yaml
+  - endpoints/list_admin_templates.yaml

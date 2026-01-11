@@ -1,0 +1,5 @@
+path: "/admin/templates"
+method: "POST"
+extra:
+  python:
+    source: "endpoints/add_template.py"

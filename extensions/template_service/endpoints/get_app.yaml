@@ -1,0 +1,5 @@
+path: "/apps/<app_id>"
+method: "GET"
+extra:
+  python:
+    source: "endpoints/get_app.py"
