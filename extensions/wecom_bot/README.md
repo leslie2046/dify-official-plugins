@@ -22,3 +22,13 @@ After saving, you will get a URL. Copy it and paste it into the WeCom configurat
 
 Now you can chat with this bot in WeCom:
 ![4](./_assets/4.jpg)
+
+#### Optional: Use the Dify API based endpoint
+
+This plugin also provides an additional endpoint path `/dify-api`.
+
+Use this variant when you want the WeCom callback to call Dify's external Chat API directly. In that endpoint configuration, fill in:
+
+- Token and Encoding-AESKey
+- Dify API Key
+- Dify Base URL, which must be a public `https://` address, for example `https://your-dify-host/v1`

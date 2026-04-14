@@ -24,6 +24,7 @@ resource:
 plugins:
   endpoints:
     - group/wecom.yaml
+    - group/wecom_dify_api.yaml
 meta:
   version: 0.0.1
   arch:

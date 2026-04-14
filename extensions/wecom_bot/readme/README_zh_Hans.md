@@ -22,3 +22,13 @@
 
 之后就可以在企业微信中和这个机器人愉快的聊天了:
 ![4](./_assets/4.jpg)
+
+#### 可选：使用基于 Dify API 的端点
+
+这个插件额外提供了一个 `/dify-api` 路径的端点。
+
+如果你希望企业微信回调直接调用 Dify 对外的 Chat API，可以改用这个端点配置，并填写：
+
+- Token 和 Encoding-AESKey
+- Dify API Key
+- Dify Base URL，必须是公开可访问的 `https://` 地址，例如 `https://你的-dify-域名/v1`

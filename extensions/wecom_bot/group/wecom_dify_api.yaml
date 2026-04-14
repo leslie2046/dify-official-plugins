@@ -1,0 +1,40 @@
+settings:
+  - name: token
+    type: text-input
+    required: true
+    label:
+      en_US: Token
+      zh_Hans: Token
+      ja_JP: トークン
+  - name: encoding_aes_key
+    type: secret-input
+    required: true
+    label:
+      en_US: Encoding AES Key
+      zh_Hans: EncodingAESKey
+      ja_JP: Encoding AES Key
+  - name: api_key
+    type: secret-input
+    required: true
+    label:
+      en_US: Dify API Key
+      zh_Hans: Dify API Key
+      ja_JP: Dify API Key
+    placeholder:
+      en_US: Please input the API key for your Dify chat app
+      zh_Hans: 请输入 Dify 对话应用的 API Key
+      ja_JP: Dify チャットアプリの API Key を入力してください
+  - name: base_url
+    type: text-input
+    required: true
+    label:
+      en_US: Dify Base URL
+      zh_Hans: Dify Base URL
+      ja_JP: Dify Base URL
+    placeholder:
+      en_US: https://your-dify-host/v1
+      zh_Hans: https://你的-dify-域名/v1
+      ja_JP: https://your-dify-host/v1
+endpoints:
+  - endpoints/wecom_dify_verify.yaml
+  - endpoints/wecom_dify_message.yaml

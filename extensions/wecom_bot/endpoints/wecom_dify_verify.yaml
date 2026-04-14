@@ -1,0 +1,5 @@
+path: "/dify-api"
+method: "GET"
+extra:
+  python:
+    source: "endpoints/wecom_verify.py"

@@ -19,3 +19,13 @@ Difyのプラグインページで`企業微信Bot`プラグインを見つけ�
 
 これでWeComでこのボットと楽しくチャットできるようになります：
 ![4](./_assets/4.jpg)
+
+#### オプション: Dify API ベースのエンドポイントを使う
+
+このプラグインは追加で `/dify-api` パスのエンドポイントも提供します。
+
+企業微信のコールバックから Dify の外部 Chat API を直接呼び出したい場合は、このエンドポイントを使い、以下を設定してください。
+
+- Token と Encoding-AESKey
+- Dify API Key
+- Dify Base URL（公開到達可能な `https://` アドレス。例: `https://your-dify-host/v1`）
