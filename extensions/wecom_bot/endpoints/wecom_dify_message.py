@@ -366,6 +366,91 @@ class WeComDifyMessageEndpoint(Endpoint):
             return "Please analyze the attached content."
         return "Please help with the attached content."
 
+    def _append_query_part(
+        self, query_parts: list[str], text: str, *, prefix: str | None = None
+    ) -> None:
+        normalized = text.strip()
+        if not normalized:
+            return
+        if prefix:
+            query_parts.append(f"{prefix}{normalized}")
+        else:
+            query_parts.append(normalized)
+
+    def _collect_dify_message_content(
+        self,
+        *,
+        container: Mapping[str, Any],
+        message_id: str,
+        cryptor: WeComCryptor,
+        normalized_base_url: str,
+        api_key: str,
+        user: str,
+        query_parts: list[str],
+        files: list[Mapping[str, str]],
+        next_file_index: list[int],
+        text_prefix: str | None = None,
+    ) -> None:
+        msgtype = str(container.get("msgtype") or "")
+
+        if msgtype == "text":
+            self._append_query_part(
+                query_parts,
+                str(container.get("text", {}).get("content", "")),
+                prefix=text_prefix,
+            )
+            return
+
+        if msgtype == "voice":
+            self._append_query_part(
+                query_parts,
+                str(container.get("voice", {}).get("content", "")),
+                prefix=text_prefix,
+            )
+            return
+
+        if msgtype in {"image", "file", "video"}:
+            media_url = str(container.get(msgtype, {}).get("url", "")).strip()
+            if not media_url:
+                return
+            files.append(
+                self._upload_wecom_media_to_dify(
+                    media_url=media_url,
+                    msgtype=msgtype,
+                    index=next_file_index[0],
+                    message_id=message_id,
+                    user=user,
+                    base_url=normalized_base_url,
+                    api_key=api_key,
+                    cryptor=cryptor,
+                )
+            )
+            next_file_index[0] += 1
+            return
+
+        if msgtype != "mixed":
+            return
+
+        msg_items = container.get("mixed", {}).get("msg_item", [])
+        if not isinstance(msg_items, list):
+            return
+
+        for item in msg_items:
+            if not isinstance(item, Mapping):
+                continue
+            self._collect_dify_message_content(
+                container=item,
+                message_id=message_id,
+                cryptor=cryptor,
+                normalized_base_url=normalized_base_url,
+                api_key=api_key,
+                user=user,
+                query_parts=query_parts,
+                files=files,
+                next_file_index=next_file_index,
+                text_prefix=text_prefix,
+            )
+
     def _build_dify_query_and_files(
         self,
         *,
@@ -377,106 +462,61 @@ class WeComDifyMessageEndpoint(Endpoint):
     ) -> tuple[str, list[Mapping[str, str]]]:
         msgtype = str(payload.get("msgtype") or "")
         user = self._build_dify_user(payload)
+        query_parts: list[str] = []
         files: list[Mapping[str, str]] = []
+        next_file_index = [0]
 
-        if msgtype == "text":
-            query = str(payload.get("text", {}).get("content", "")).strip()
-            return (query, files)
+        self._collect_dify_message_content(
+            container=payload,
+            message_id=message_id,
+            cryptor=cryptor,
+            normalized_base_url=normalized_base_url,
+            api_key=api_key,
+            user=user,
+            query_parts=query_parts,
+            files=files,
+            next_file_index=next_file_index,
+        )
 
-        if msgtype == "voice":
-            query = str(payload.get("voice", {}).get("content", "")).strip()
-            return (query, files)
+        quote = payload.get("quote")
+        if isinstance(quote, Mapping):
+            self._collect_dify_message_content(
+                container=quote,
+                message_id=message_id,
+                cryptor=cryptor,
+                normalized_base_url=normalized_base_url,
+                api_key=api_key,
+                user=user,
+                query_parts=query_parts,
+                files=files,
+                next_file_index=next_file_index,
+                text_prefix="Quoted content: ",
+            )
 
-        if msgtype == "image":
-            media_url = str(payload.get("image", {}).get("url", "")).strip()
-            if media_url:
-                files.append(
-                    self._upload_wecom_media_to_dify(
-                        media_url=media_url,
-                        msgtype="image",
-                        index=0,
-                        message_id=message_id,
-                        user=user,
-                        base_url=normalized_base_url,
-                        api_key=api_key,
-                        cryptor=cryptor,
-                    )
-                )
-            return (self._default_query_for_msgtype(msgtype), files)
+        query = "\n".join(part for part in query_parts if part).strip()
+        if not query and files:
+            fallback_msgtype = msgtype
+            quote = payload.get("quote")
+            if fallback_msgtype == "text" and isinstance(quote, Mapping):
+                quote_msgtype = str(quote.get("msgtype") or "")
+                if quote_msgtype in {"image", "file", "video", "mixed", "voice"}:
+                    fallback_msgtype = quote_msgtype
+            query = self._default_query_for_msgtype(fallback_msgtype)
 
-        if msgtype == "file":
-            media_url = str(payload.get("file", {}).get("url", "")).strip()
-            if media_url:
-                files.append(
-                    self._upload_wecom_media_to_dify(
-                        media_url=media_url,
-                        msgtype="file",
-                        index=0,
-                        message_id=message_id,
-                        user=user,
-                        base_url=normalized_base_url,
-                        api_key=api_key,
-                        cryptor=cryptor,
-                    )
-                )
-            return (self._default_query_for_msgtype(msgtype), files)
+        logger.info(
+            "WeCom Dify request summary: msgid=%r msgtype=%r query_preview=%r files_count=%d",
+            message_id,
+            msgtype,
+            query[:200],
+            len(files),
+        )
+        logger.info(
+            "WeCom Dify final query: msgid=%r query=%r",
+            message_id,
+            query,
+        )
 
-        if msgtype == "video":
-            media_url = str(payload.get("video", {}).get("url", "")).strip()
-            if media_url:
-                files.append(
-                    self._upload_wecom_media_to_dify(
-                        media_url=media_url,
-                        msgtype="video",
-                        index=0,
-                        message_id=message_id,
-                        user=user,
-                        base_url=normalized_base_url,
-                        api_key=api_key,
-                        cryptor=cryptor,
-                    )
-                )
-            return (self._default_query_for_msgtype(msgtype), files)
-
-        if msgtype == "mixed":
-            text_parts: list[str] = []
-            msg_items = payload.get("mixed", {}).get("msg_item", [])
-            if isinstance(msg_items, list):
-                image_index = 0
-                for item in msg_items:
-                    if not isinstance(item, Mapping):
-                        continue
-                    item_type = str(item.get("msgtype") or "")
-                    if item_type == "text":
-                        text_value = str(
-                            item.get("text", {}).get("content", "")
-                        ).strip()
-                        if text_value:
-                            text_parts.append(text_value)
-                    elif item_type == "image":
-                        media_url = str(item.get("image", {}).get("url", "")).strip()
-                        if not media_url:
-                            continue
-                        files.append(
-                            self._upload_wecom_media_to_dify(
-                                media_url=media_url,
-                                msgtype="image",
-                                index=image_index,
-                                message_id=message_id,
-                                user=user,
-                                base_url=normalized_base_url,
-                                api_key=api_key,
-                                cryptor=cryptor,
-                            )
-                        )
-                        image_index += 1
-
-            query = "\n".join(text_parts).strip()
-            if not query:
-                query = self._default_query_for_msgtype(msgtype)
-            return (query, files)
-
-        return ("", files)
+        return (query, files)
 
     def _stream_dify_chat_events(
         self,
@@ -582,6 +622,21 @@ class WeComDifyMessageEndpoint(Endpoint):
         raw_userid = raw_from.get("userid") if isinstance(raw_from, Mapping) else None
         return str(raw_userid or "")
 
+    def _extract_dify_event_conversation_id(
+        self, data: Mapping[str, Any]
+    ) -> str | None:
+        conversation_id = data.get("conversation_id")
+        if conversation_id:
+            return str(conversation_id)
+
+        metadata = data.get("metadata")
+        if isinstance(metadata, Mapping):
+            metadata_conversation_id = metadata.get("conversation_id")
+            if metadata_conversation_id:
+                return str(metadata_conversation_id)
+
+        return None
+
     def _invoke(self, r: Request, values: Mapping, settings: Mapping) -> Response:
         token = settings.get("token")
         encoding_key = settings.get("encoding_aes_key")
@@ -628,6 +683,12 @@ class WeComDifyMessageEndpoint(Endpoint):
             return Response(status=400, response=f"decrypt_failed:{exc}")
 
         logger.info("WeCom Dify endpoint payload: %s", payload)
+        quote = payload.get("quote") if isinstance(payload, Mapping) else None
+        logger.info(
+            "WeCom Dify endpoint quote summary: has_quote=%r quote_msgtype=%r",
+            isinstance(quote, Mapping),
+            quote.get("msgtype") if isinstance(quote, Mapping) else None,
+        )
         msgtype = payload.get("msgtype")
         logger.info(
             "WeCom Dify endpoint received message: msgtype=%r msgid=%r",
@@ -709,18 +770,6 @@ class WeComDifyMessageEndpoint(Endpoint):
         if msgtype not in {"text", "voice", "image", "file", "video", "mixed"}:
             return Response(status=200, response="success")
 
-        if (
-            msgtype == "text"
-            and not str(payload.get("text", {}).get("content", "")).strip()
-        ):
-            return Response(status=200, response="success")
-
-        if (
-            msgtype == "voice"
-            and not str(payload.get("voice", {}).get("content", "")).strip()
-        ):
-            return Response(status=200, response="success")
-
         if self.session.storage.exist(self._state_key(message_id)):
             logger.info("Duplicate Dify API message detected/poll: %s", message_id)
             return handle_poll(message_id)
@@ -793,20 +842,38 @@ class WeComDifyMessageEndpoint(Endpoint):
                 for data in response_generator:
                     event = data.get("event")
 
-                    if event == "message":
-                        full_answer += str(data.get("answer", ""))
+                    if event in {"agent_message", "message"}:
+                        answer = str(data.get("answer", ""))
+                        if answer:
+                            full_answer += answer
+                            safe_set(
+                                self._content_key(message_id),
+                                full_answer.encode("utf-8"),
+                            )
+
+                        conv_id = self._extract_dify_event_conversation_id(data)
+                        if conv_id and conv_key:
+                            safe_set(conv_key, conv_id.encode("utf-8"))
+
+                    elif event == "message_replace":
+                        full_answer = str(data.get("answer", ""))
                         safe_set(
                             self._content_key(message_id), full_answer.encode("utf-8")
                         )
 
-                        conv_id = data.get("conversation_id")
+                        conv_id = self._extract_dify_event_conversation_id(data)
                         if conv_id and conv_key:
-                            safe_set(conv_key, str(conv_id).encode("utf-8"))
+                            safe_set(conv_key, conv_id.encode("utf-8"))
+
+                    elif event == "agent_thought":
+                        conv_id = self._extract_dify_event_conversation_id(data)
+                        if conv_id and conv_key:
+                            safe_set(conv_key, conv_id.encode("utf-8"))
 
                     elif event == "message_end":
-                        conv_id = data.get("conversation_id")
+                        conv_id = self._extract_dify_event_conversation_id(data)
                         if conv_id and conv_key:
-                            safe_set(conv_key, str(conv_id).encode("utf-8"))
+                            safe_set(conv_key, conv_id.encode("utf-8"))
                         break
 
                     elif event == "error":
