@@ -1,8 +1,10 @@
 from collections.abc import Mapping
+import html
 import hashlib
 import ipaddress
 import json
 import logging
+import re
 import socket
 from typing import Any, Iterator
 from urllib import error, parse, request
@@ -78,7 +80,7 @@ class WeComDifyMessageEndpoint(Endpoint):
                 )
 
     def _user_safe_error_message(self) -> str:
-        return "Request failed, please retry later."
+        return "请求失败，请稍后重试。"
 
     def _build_wecom_res(
         self,
@@ -357,14 +359,14 @@ class WeComDifyMessageEndpoint(Endpoint):
 
     def _default_query_for_msgtype(self, msgtype: str) -> str:
         if msgtype == "image":
-            return "Please analyze the attached image."
+            return "请解析附件图片。"
         if msgtype == "video":
-            return "Please analyze the attached video."
+            return "请解析附件视频。"
         if msgtype == "file":
-            return "Please analyze the attached file."
+            return "请解析附件文件。"
         if msgtype == "mixed":
-            return "Please analyze the attached content."
-        return "Please help with the attached content."
+            return "请解析附件内容。"
+        return "请解析附件内容。"
 
     def _append_query_part(
         self, query_parts: list[str], text: str, *, prefix: str | None = None
@@ -637,6 +639,175 @@ class WeComDifyMessageEndpoint(Endpoint):
 
         return None
 
+    def _format_dify_agent_thought(self, data: Mapping[str, Any]) -> str:
+        tool = str(data.get("tool", "")).strip()
+        if not tool:
+            return ""
+        return f"› 已使用 {tool}"
+
+    def _sanitize_display_text(self, text: str) -> str:
+        if not text:
+            return ""
+
+        sanitized = html.unescape(text)
+        sanitized = sanitized.replace("\\r\\n", "\n").replace("\\n", "\n")
+        sanitized = sanitized.replace("\\t", " ").replace("\r\n", "\n")
+        sanitized = re.sub(r"<[^>]+>", " ", sanitized)
+        sanitized = re.sub(r"\s+", " ", sanitized).strip()
+        return sanitized
+
+    def _flatten_tool_value(self, value: Any, prefix: str = "") -> list[str]:
+        if isinstance(value, Mapping):
+            if not prefix and len(value) == 1:
+                only_value = next(iter(value.values()))
+                if isinstance(only_value, (Mapping, list, tuple)):
+                    return self._flatten_tool_value(only_value)
+
+            parts: list[str] = []
+            for key, item in value.items():
+                new_prefix = f"{prefix}.{key}" if prefix else str(key)
+                parts.extend(self._flatten_tool_value(item, new_prefix))
+            return parts
+
+        if isinstance(value, (list, tuple)):
+            parts: list[str] = []
+            for index, item in enumerate(value, start=1):
+                new_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+                parts.extend(self._flatten_tool_value(item, new_prefix))
+            return parts
+
+        text = self._sanitize_display_text(str(value))
+        if not text:
+            return []
+        return [f"{prefix}={text}" if prefix else text]
+
+    def _format_tool_input_summary(self, tool_input: Any) -> str:
+        parsed_input = tool_input
+        if isinstance(tool_input, str):
+            raw_text = tool_input.strip()
+            if raw_text.startswith(("{", "[")):
+                try:
+                    parsed_input = json.loads(raw_text)
+                except json.JSONDecodeError:
+                    parsed_input = raw_text
+            else:
+                parsed_input = raw_text
+
+        parts = self._flatten_tool_value(parsed_input)
+        summary = "，".join(parts)
+        if len(summary) > 120:
+            summary = summary[:117].rstrip() + "..."
+        return summary
+
+    def _extract_observation_text(self, value: Any) -> str:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate.startswith(("{", "[")):
+                try:
+                    return self._extract_observation_text(json.loads(candidate))
+                except json.JSONDecodeError:
+                    return self._sanitize_display_text(candidate)
+            return self._sanitize_display_text(candidate)
+
+        if isinstance(value, Mapping):
+            for key in (
+                "result",
+                "content",
+                "text",
+                "message",
+                "observation",
+                "answer",
+            ):
+                if key in value:
+                    extracted = self._extract_observation_text(value.get(key))
+                    if extracted:
+                        return extracted
+
+            if len(value) == 1:
+                return self._extract_observation_text(next(iter(value.values())))
+
+            flattened = self._flatten_tool_value(value)
+            return "，".join(flattened)
+
+        if isinstance(value, (list, tuple)):
+            parts = [self._extract_observation_text(item) for item in value]
+            parts = [part for part in parts if part]
+            return "；".join(parts)
+
+        return self._sanitize_display_text(str(value))
+
+    def _format_tool_observation_summary(self, observation: str) -> str:
+        summary = self._extract_observation_text(observation)
+        if len(summary) > 200:
+            summary = summary[:197].rstrip() + "..."
+        return summary
+
+    def _build_dify_agent_thought_key(self, data: Mapping[str, Any]) -> str:
+        thought_id = data.get("id")
+        if thought_id:
+            return f"id:{thought_id}"
+
+        position = data.get("position")
+        if position not in {None, ""}:
+            return f"position:{position}"
+
+        created_at = data.get("created_at")
+        if created_at not in {None, ""}:
+            return f"created_at:{created_at}"
+
+        return f"fallback:{hash(json.dumps(dict(data), ensure_ascii=False, sort_keys=True, default=str))}"
+
+    def _compose_dify_stream_content(
+        self,
+        rendered_thoughts: list[str],
+        think_text: str,
+        answer_text: str,
+    ) -> str:
+        parts: list[str] = []
+        thought_parts = [part for part in rendered_thoughts if part]
+        if thought_parts:
+            parts.append("\n\n".join(thought_parts))
+        if think_text:
+            think_lines = [
+                line.strip() for line in think_text.splitlines() if line.strip()
+            ]
+            parts.append(
+                "> 深度思考\n" + "\n".join(f"> {line}" for line in think_lines)
+            )
+        if answer_text:
+            parts.append(answer_text)
+        return "\n\n".join(parts)
+
+    def _render_dify_answer_text(self, text: str) -> tuple[str, str]:
+        if not text:
+            return ("", "")
+
+        source = text
+        lower_text = source.lower()
+        last_open = lower_text.rfind("<think>")
+        last_close = lower_text.rfind("</think>")
+        if last_open != -1 and last_open > last_close:
+            source = source[:last_open]
+
+        think_parts: list[str] = []
+
+        def replace_think_block(match: re.Match[str]) -> str:
+            think_content = match.group(1).strip()
+            if think_content:
+                think_parts.append(think_content)
+            return ""
+
+        visible_text = re.sub(
+            r"<think>(.*?)</think>",
+            replace_think_block,
+            source,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        visible_text = re.sub(r"</?think>", "", visible_text, flags=re.IGNORECASE)
+        visible_text = re.sub(r"\n{3,}", "\n\n", visible_text).strip()
+        think_text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(think_parts)).strip()
+        return (think_text, visible_text)
+
     def _invoke(self, r: Request, values: Mapping, settings: Mapping) -> Response:
         token = settings.get("token")
         encoding_key = settings.get("encoding_aes_key")
@@ -814,7 +985,11 @@ class WeComDifyMessageEndpoint(Endpoint):
         )
 
         def consume_response():
-            full_answer = ""
+            thought_order: list[str] = []
+            thought_blocks: dict[str, str] = {}
+            raw_answer_text = ""
+            think_text = ""
+            answer_text = ""
             try:
                 query, dify_files = self._build_dify_query_and_files(
                     payload=payload,
@@ -845,10 +1020,17 @@ class WeComDifyMessageEndpoint(Endpoint):
                     if event in {"agent_message", "message"}:
                         answer = str(data.get("answer", ""))
                         if answer:
-                            full_answer += answer
+                            raw_answer_text += answer
+                            think_text, answer_text = self._render_dify_answer_text(
+                                raw_answer_text
+                            )
                             safe_set(
                                 self._content_key(message_id),
-                                full_answer.encode("utf-8"),
+                                self._compose_dify_stream_content(
+                                    [thought_blocks[key] for key in thought_order],
+                                    think_text,
+                                    answer_text,
+                                ).encode("utf-8"),
                             )
 
                         conv_id = self._extract_dify_event_conversation_id(data)
@@ -856,9 +1038,17 @@ class WeComDifyMessageEndpoint(Endpoint):
                             safe_set(conv_key, conv_id.encode("utf-8"))
 
                     elif event == "message_replace":
-                        full_answer = str(data.get("answer", ""))
+                        raw_answer_text = str(data.get("answer", ""))
+                        think_text, answer_text = self._render_dify_answer_text(
+                            raw_answer_text
+                        )
                         safe_set(
-                            self._content_key(message_id), full_answer.encode("utf-8")
+                            self._content_key(message_id),
+                            self._compose_dify_stream_content(
+                                [thought_blocks[key] for key in thought_order],
+                                think_text,
+                                answer_text,
+                            ).encode("utf-8"),
                         )
 
                         conv_id = self._extract_dify_event_conversation_id(data)
@@ -866,6 +1056,21 @@ class WeComDifyMessageEndpoint(Endpoint):
                             safe_set(conv_key, conv_id.encode("utf-8"))
 
                     elif event == "agent_thought":
+                        rendered_thought = self._format_dify_agent_thought(data)
+                        if rendered_thought:
+                            thought_key = self._build_dify_agent_thought_key(data)
+                            if thought_key not in thought_blocks:
+                                thought_order.append(thought_key)
+                            thought_blocks[thought_key] = rendered_thought
+                            safe_set(
+                                self._content_key(message_id),
+                                self._compose_dify_stream_content(
+                                    [thought_blocks[key] for key in thought_order],
+                                    think_text,
+                                    answer_text,
+                                ).encode("utf-8"),
+                            )
+
                         conv_id = self._extract_dify_event_conversation_id(data)
                         if conv_id and conv_key:
                             safe_set(conv_key, conv_id.encode("utf-8"))
@@ -882,7 +1087,11 @@ class WeComDifyMessageEndpoint(Endpoint):
                             message_id,
                             data,
                         )
-                        if not full_answer:
+                        if not self._compose_dify_stream_content(
+                            [thought_blocks[key] for key in thought_order],
+                            think_text,
+                            answer_text,
+                        ):
                             safe_set(
                                 self._content_key(message_id),
                                 self._user_safe_error_message().encode("utf-8"),
