@@ -25,9 +25,9 @@ from provider.deepseek import DeepSeekProvider
 
 MODELS = (
     "deepseek-flash",
-    "deepseek-v4-pro",
     "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
+    "deepseek-v4-pro",
 )
 
 
@@ -51,7 +51,7 @@ def test_current_catalog_and_parameter_boundaries() -> None:
             (directory / f"{model}.yaml").read_text(encoding="utf-8")
         )
         entity = AIModelEntity.model_validate(schema)
-        assert entity.deprecated is (model in MODELS[2:])
+        assert entity.deprecated is False
         rules = {rule["name"]: rule for rule in schema["parameter_rules"]}
         if model == "deepseek-flash":
             assert schema["label"] == {"zh_Hans": model, "en_US": model}

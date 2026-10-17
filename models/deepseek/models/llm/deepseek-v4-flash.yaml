@@ -3,7 +3,7 @@ label:
   zh_Hans: deepseek-v4-flash
   en_US: deepseek-v4-flash
 model_type: llm
-deprecated: true
+deprecated: false
 features:
   - vision
   - agent-thought

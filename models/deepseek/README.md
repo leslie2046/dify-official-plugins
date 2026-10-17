@@ -17,11 +17,11 @@ and is ignored in thinking mode. See the
 [Chat Completions reference](https://api-docs.deepseek.com/api/create-chat-completion)
 and [Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode).
 
-The legacy IDs `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are retained
-with `deprecated: true` for existing apps. Select `deepseek-flash` for new apps
-and migrate existing apps to it. The legacy IDs retain their 4,096-token output
-defaults and use the current Flash sampling rules. The plugin sends the selected
-API ID unchanged.
+The legacy IDs `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` remain
+available with `deprecated: false`, so existing apps can keep their model selection.
+They retain their 4,096-token output defaults and use the current Flash sampling
+rules. The plugin sends the selected API ID unchanged. Select `deepseek-flash`
+when configuring the current Flash model explicitly.
 Credential validation uses `deepseek-flash`.
 
 Images can be supplied as URLs or inline Base64 in user and tool messages.
