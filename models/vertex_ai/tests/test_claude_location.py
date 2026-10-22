@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from types import SimpleNamespace
+
 from anthropic.types import Message, TextBlock, Usage
 from dify_plugin.entities.model.message import UserPromptMessage
 
@@ -17,6 +20,11 @@ class _FakeMessages:
             stop_sequence=None,
             usage=Usage(input_tokens=1, output_tokens=1),
         )
+
+    # Non-streaming calls go through messages.stream() and collect the final message.
+    @contextmanager
+    def stream(self, **kwargs):
+        yield SimpleNamespace(get_final_message=lambda: self.create(**kwargs))
 
 
 def _patch_client(monkeypatch) -> list[str]:
